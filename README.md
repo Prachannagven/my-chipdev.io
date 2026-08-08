@@ -3,7 +3,9 @@
 This repository is a local-only SystemVerilog practice environment. It provides:
 
 - A HackerRank-style browser UI with the brief on the left and an editor on the right.
-- A local Verilator execution path for running a question against your current code.
+- Separate Run and Submit paths for public and hidden grading.
+- Persistent drafts, solved/attempted status, and complete submission history.
+- A local Verilator execution path for grading your current code.
 - A terminal-first workflow so you can stay in Neovim when you want to.
 
 ## Layout
@@ -35,9 +37,9 @@ Start the local execution API in a second terminal with:
 npm run api
 ```
 
-The browser UI will call this API locally to compile your submission with Verilator and run the question testbench.
+The browser UI calls this API locally. **Run** grades the visible portion of the deterministic suite and returns case details plus a VCD. **Submit** grades the complete suite, exposes hidden results only as an aggregate, and records the source and verdict under `.chipdev/state.json`.
 
-Every run emits a VCD waveform file under `.chipdev/runs/<question>/<timestamp>/dump.vcd`. If a simulation fails at runtime, the waveform still captures the activity up to the failure point, so you can inspect the bug in GTKWave or another VCD viewer.
+Public runs emit VCD waveform files under `.chipdev/runs/<question>/`. Submission and hidden waveforms are not returned to the browser.
 
 ## Terminal Workflow
 
@@ -47,12 +49,13 @@ Use the CLI from the terminal when you want to stay in Neovim:
 npm run cli -- --question Q01_Simple_Router --source path/to/solution.sv
 ```
 
-You can also pipe source in through standard input once the CLI lands.
+You can also pipe source through standard input.
 
 ## Development
 
 ```bash
 npm run build
+npm test
 ```
 
-This validates the browser app bundle. The local runner uses Verilator directly on your machine, so Verilator must be installed and available on `PATH`.
+These commands validate the browser bundle, persistent state behavior, and the 34-question asset manifest. The local runner uses Verilator directly on your machine, so Verilator must be installed and available on `PATH`.

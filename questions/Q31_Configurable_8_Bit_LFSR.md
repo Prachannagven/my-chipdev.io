@@ -2,8 +2,20 @@
 
 Design a configurable 8-bit linear feedback shift register. The circuit should support loading a seed value and selecting feedback taps at runtime so that different pseudo-random sequences can be generated.
 
+Module interface:
+```systemverilog
+module configurable_8_bit_lfsr (
+  input logic clk,
+  input logic resetn,
+  input logic load,
+  input logic [7:0] seed,
+  input logic [7:0] taps,
+  output logic [7:0] dout
+);
+```
+
 Behavior expectations:
-The register should initialize from the provided seed, advance one step per clock, and update its output deterministically from the chosen taps. A good implementation should be able to reproduce the same sequence when reset and re-seeded with the same configuration.
+On each rising edge, an asserted active-low `resetn` clears `dout`. Otherwise `load` loads `seed`; normal operation updates `dout` to `{dout[6:0], ^(dout & taps)}`.
 
 Sample case:
 Load seed `8'b10110011`, then clock the design forward. The output should change on each clock edge and remain reproducible for the same seed and tap selection.

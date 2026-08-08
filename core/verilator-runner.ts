@@ -3,6 +3,7 @@ import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { getQuestionConfig } from './question-manifest';
 
 export type RunRequest = {
   questionFileName: string;
@@ -25,6 +26,31 @@ export type RunResult = {
   waveform?: WaveformData;
 };
 
+export type GradeRequest = {
+  questionId: string;
+  source: string;
+  mode: 'run' | 'submit';
+};
+
+export type PublicCaseResult = {
+  id: string;
+  status: 'passed' | 'failed';
+  expected?: string;
+  actual?: string;
+  message?: string;
+};
+
+export type GradeResult = {
+  status: 'accepted' | 'wrong_answer' | 'compile_error' | 'runtime_error' | 'timeout' | 'internal_error';
+  public: { passed: number; total: number; cases: PublicCaseResult[] };
+  hidden?: { passed: number; total: number };
+  diagnostics: string[];
+  stdout: string;
+  stderr: string;
+  vcdPath?: string;
+  waveform?: WaveformData;
+};
+
 type ComparisonMismatch = {
   signal: string;
   time: number;
@@ -34,7 +60,7 @@ type ComparisonMismatch = {
 
 type SimulationResult = {
   ok: boolean;
-  status: 'compile_error' | 'runtime_error' | 'completed';
+  status: 'compile_error' | 'runtime_error' | 'timeout' | 'completed';
   sourceFile: string;
   testbenchCopy: string;
   vcdPath: string;
@@ -59,7 +85,9 @@ export type WaveformData = {
   }>;
 };
 
-function runProcess(command: string, args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
+const referenceCache = new Map<string, Promise<SimulationResult>>();
+
+function runProcess(command: string, args: string[], cwd: string, timeoutMs = 120_000): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
@@ -70,6 +98,15 @@ function runProcess(command: string, args: string[], cwd: string): Promise<{ cod
 
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      if (process.platform === 'win32' && child.pid) {
+        spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true });
+      } else {
+        child.kill('SIGKILL');
+      }
+    }, timeoutMs);
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -80,9 +117,13 @@ function runProcess(command: string, args: string[], cwd: string): Promise<{ cod
       stderr += chunk;
     });
 
-    child.on('error', reject);
+    child.on('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
     child.on('close', (code) => {
-      resolve({ code: code ?? 1, stdout, stderr });
+      clearTimeout(timeout);
+      resolve({ code: code ?? 1, stdout, stderr, timedOut });
     });
   });
 }
@@ -131,7 +172,7 @@ function prepareVerilatorArgs(args: string[]): string[] {
   });
 }
 
-function runVerilatorBuild(args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
+function runVerilatorBuild(args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }> {
   const msysBash = 'C:\\msys64\\usr\\bin\\bash.exe';
   if (process.platform === 'win32' && existsSync(msysBash) && !process.env.VERILATOR) {
     const command = `export MSYSTEM=MINGW64; export PATH=/mingw64/bin:/usr/bin:$PATH; unset VERILATOR_ROOT; /mingw64/bin/verilator ${prepareVerilatorArgs(args).map(shellEscape).join(' ')}`;
@@ -406,7 +447,13 @@ function findDutSignal(vcd: ParsedVcd, port: string): { width: number; samples: 
   return Array.from(vcd.signalByName.entries()).find(([name]) => name.endsWith(`.DUT.${port}`))?.[1];
 }
 
-function compareOutputWaveforms(candidate: ParsedVcd, reference: ParsedVcd, outputPorts: string[]): ComparisonMismatch[] {
+function compareOutputWaveforms(
+  candidate: ParsedVcd,
+  reference: ParsedVcd,
+  outputPorts: string[],
+  startTime = 0,
+  endTime = Number.POSITIVE_INFINITY,
+): ComparisonMismatch[] {
   const mismatches: ComparisonMismatch[] = [];
 
   for (const port of outputPorts) {
@@ -424,9 +471,10 @@ function compareOutputWaveforms(candidate: ParsedVcd, reference: ParsedVcd, outp
     }
 
     const times = Array.from(new Set([
+      startTime,
       ...actualSignal.samples.map((sample) => sample.time),
       ...expectedSignal.samples.map((sample) => sample.time),
-    ])).sort((a, b) => a - b);
+    ])).filter((time) => time >= startTime && time <= endTime).sort((a, b) => a - b);
 
     for (const time of times) {
       const actual = valueAt(actualSignal.samples, time, actualSignal.width);
@@ -441,14 +489,19 @@ function compareOutputWaveforms(candidate: ParsedVcd, reference: ParsedVcd, outp
   return mismatches;
 }
 
-async function runSimulation(source: string, testbenchSource: string, testbenchFile: string, topModule: string, workDir: string): Promise<SimulationResult> {
+function stopTestbenchAt(testbenchSource: string, stopAt?: number): string {
+  if (!stopAt || stopAt <= 0) return testbenchSource;
+  return testbenchSource.replace(/endmodule\s*$/i, `\n  initial begin\n    #${Math.floor(stopAt)};\n    $finish;\n  end\nendmodule\n`);
+}
+
+async function runSimulation(source: string, testbenchSource: string, testbenchFile: string, topModule: string, workDir: string, stopAt?: number): Promise<SimulationResult> {
   const sourceFile = path.join(workDir, 'candidate.sv');
   const testbenchCopy = path.join(workDir, path.basename(testbenchFile));
   const vcdPath = path.join(workDir, 'dump.vcd');
 
   await mkdir(workDir, { recursive: true });
   await writeFile(sourceFile, source, 'utf8');
-  await writeFile(testbenchCopy, testbenchSource, 'utf8');
+  await writeFile(testbenchCopy, stopTestbenchAt(testbenchSource, stopAt), 'utf8');
 
   const buildArgs = [
     '--binary',
@@ -471,7 +524,7 @@ async function runSimulation(source: string, testbenchSource: string, testbenchF
     const combined = `${build.stdout}\n${build.stderr}`;
     return {
       ok: false,
-      status: 'compile_error',
+      status: build.timedOut ? 'timeout' : 'compile_error',
       sourceFile,
       testbenchCopy,
       vcdPath,
@@ -484,7 +537,7 @@ async function runSimulation(source: string, testbenchSource: string, testbenchF
 
   const binaryName = `V${topModule}${process.platform === 'win32' ? '.exe' : ''}`;
   const executable = path.join(workDir, 'obj_dir', binaryName);
-  const execute = await runProcess(executable, [], workDir);
+  const execute = await runProcess(executable, [], workDir, 15_000);
   const fullStdout = `${build.stdout}${execute.stdout}`;
   const fullStderr = `${build.stderr}${execute.stderr}`;
   const diagnostics = extractDiagnostics(`${fullStdout}\n${fullStderr}`);
@@ -503,7 +556,7 @@ async function runSimulation(source: string, testbenchSource: string, testbenchF
 
   return {
     ok: execute.code === 0,
-    status: execute.code === 0 ? 'completed' : 'runtime_error',
+    status: execute.timedOut ? 'timeout' : execute.code === 0 ? 'completed' : 'runtime_error',
     sourceFile,
     testbenchCopy,
     vcdPath: await resolveVcdPath(vcdPath),
@@ -513,6 +566,183 @@ async function runSimulation(source: string, testbenchSource: string, testbenchF
     diagnostics,
     waveform,
     vcd,
+  };
+}
+
+function maxVcdTime(vcd: ParsedVcd): number {
+  return Math.max(1, ...Array.from(vcd.signalByName.values()).flatMap((signal) => signal.samples.map((sample) => sample.time)));
+}
+
+function gradeCases(
+  candidate: ParsedVcd,
+  reference: ParsedVcd,
+  outputPorts: string[],
+  count: number,
+  startTime: number,
+  endTime: number,
+  prefix: string,
+): { passed: number; total: number; cases: PublicCaseResult[]; mismatches: ComparisonMismatch[] } {
+  const duration = Math.max(1, endTime - startTime);
+  const cases: PublicCaseResult[] = [];
+  const allMismatches: ComparisonMismatch[] = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const caseStart = startTime + Math.floor((duration * index) / count);
+    const caseEnd = index === count - 1
+      ? endTime
+      : startTime + Math.floor((duration * (index + 1)) / count) - 1;
+    const mismatches = compareOutputWaveforms(candidate, reference, outputPorts, caseStart, Math.max(caseStart, caseEnd));
+    allMismatches.push(...mismatches);
+    const first = mismatches[0];
+    cases.push(first ? {
+      id: `${prefix}-${index + 1}`,
+      status: 'failed',
+      expected: first.expected,
+      actual: first.actual,
+      message: `${first.signal} differs at ${first.time}ps.`,
+    } : {
+      id: `${prefix}-${index + 1}`,
+      status: 'passed',
+    });
+  }
+
+  return {
+    passed: cases.filter((testCase) => testCase.status === 'passed').length,
+    total: count,
+    cases,
+    mismatches: allMismatches,
+  };
+}
+
+function failedGrade(
+  status: GradeResult['status'],
+  visibleCount: number,
+  simulation: SimulationResult,
+): GradeResult {
+  return {
+    status,
+    public: {
+      passed: 0,
+      total: visibleCount,
+      cases: Array.from({ length: visibleCount }, (_, index) => ({
+        id: `public-${index + 1}`,
+        status: 'failed',
+        message: status === 'compile_error' ? 'Compilation failed.' : 'Simulation did not complete.',
+      })),
+    },
+    diagnostics: simulation.diagnostics,
+    stdout: simulation.stdout,
+    stderr: simulation.stderr,
+    vcdPath: simulation.vcdPath,
+    waveform: simulation.waveform,
+  };
+}
+
+export async function gradeVerilatorQuestion(request: GradeRequest): Promise<GradeResult> {
+  const config = getQuestionConfig(request.questionId);
+  if (!config) {
+    throw new Error(`Unknown question ID: ${request.questionId}`);
+  }
+
+  const testbenchFile = path.join(process.cwd(), 'solutions', `${config.assetBase}_tb.sv`);
+  const referenceFile = path.join(process.cwd(), 'solutions', `${config.assetBase}_rtl.sv`);
+  const [testbenchSource, referenceSource] = await Promise.all([
+    readFile(testbenchFile, 'utf8'),
+    readFile(referenceFile, 'utf8'),
+  ]);
+  const topModule = resolveTopModule(testbenchSource);
+  const outputPorts = parseOutputPorts(referenceSource);
+  if (outputPorts.length === 0) {
+    throw new Error(`No output ports found in reference RTL for ${config.id}.`);
+  }
+
+  const runRoot = path.join(process.cwd(), '.chipdev', 'runs', config.id);
+  await mkdir(runRoot, { recursive: true });
+  const workDir = await mkdtemp(path.join(runRoot, `${Date.now()}-`));
+
+  let referencePromise = referenceCache.get(config.id);
+  if (!referencePromise) {
+    const referenceWorkDir = path.join(process.cwd(), '.chipdev', 'reference-cache', config.id);
+    referencePromise = runSimulation(referenceSource, testbenchSource, testbenchFile, topModule, referenceWorkDir);
+    referenceCache.set(config.id, referencePromise);
+  }
+  const reference = await referencePromise;
+  if (!reference.ok || !reference.vcd) {
+    referenceCache.delete(config.id);
+    return failedGrade('internal_error', config.visibleCount, reference);
+  }
+
+  const endTime = maxVcdTime(reference.vcd);
+  const publicEnd = Math.max(1, Math.floor(endTime * config.visibleCount / (config.visibleCount + config.hiddenCount)));
+  const candidate = request.mode === 'submit' && request.source.trim() === referenceSource.trim()
+    ? reference
+    : await runSimulation(
+      request.source,
+      testbenchSource,
+      testbenchFile,
+      topModule,
+      path.join(workDir, 'candidate'),
+      request.mode === 'run' ? publicEnd : undefined,
+    );
+
+  if (!candidate.ok || !candidate.vcd) {
+    const status = candidate.status === 'compile_error'
+      ? 'compile_error'
+      : candidate.status === 'timeout' ? 'timeout' : 'runtime_error';
+    return failedGrade(status, config.visibleCount, candidate);
+  }
+
+  const publicGrade = gradeCases(
+    candidate.vcd,
+    reference.vcd,
+    outputPorts,
+    config.visibleCount,
+    0,
+    publicEnd,
+    'public',
+  );
+  const publicResult = {
+    passed: publicGrade.passed,
+    total: publicGrade.total,
+    cases: publicGrade.cases,
+  };
+
+  if (request.mode === 'run') {
+    const passed = publicGrade.passed === publicGrade.total;
+    return {
+      status: passed ? 'accepted' : 'wrong_answer',
+      public: publicResult,
+      diagnostics: passed ? candidate.diagnostics : [
+        `${publicGrade.total - publicGrade.passed} public case(s) failed.`,
+        ...candidate.diagnostics,
+      ],
+      stdout: candidate.stdout,
+      stderr: candidate.stderr,
+      vcdPath: candidate.vcdPath,
+      waveform: candidate.waveform,
+    };
+  }
+
+  const hiddenGrade = gradeCases(
+    candidate.vcd,
+    reference.vcd,
+    outputPorts,
+    config.hiddenCount,
+    publicEnd + 1,
+    endTime,
+    'hidden',
+  );
+  const accepted = publicGrade.passed === publicGrade.total && hiddenGrade.passed === hiddenGrade.total;
+  return {
+    status: accepted ? 'accepted' : 'wrong_answer',
+    public: publicResult,
+    hidden: { passed: hiddenGrade.passed, total: hiddenGrade.total },
+    diagnostics: accepted ? candidate.diagnostics : [
+      `${publicGrade.passed}/${publicGrade.total} public and ${hiddenGrade.passed}/${hiddenGrade.total} hidden cases passed.`,
+      ...candidate.diagnostics,
+    ],
+    stdout: candidate.stdout,
+    stderr: candidate.stderr,
   };
 }
 
@@ -533,7 +763,7 @@ export async function runVerilatorQuestion(request: RunRequest): Promise<RunResu
     return {
       ok: false,
       checked: true,
-      status: candidate.status === 'completed' ? 'runtime_error' : candidate.status,
+      status: candidate.status === 'completed' || candidate.status === 'timeout' ? 'runtime_error' : candidate.status,
       verdict: 'failed',
       questionFileName: request.questionFileName,
       testbenchFile,

@@ -37,6 +37,11 @@ textarea {
   font: inherit;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .shell {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
@@ -350,6 +355,56 @@ textarea {
   justify-content: center;
 }
 
+.case-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.test-card.passed {
+  border-color: rgba(83, 211, 192, 0.65);
+}
+
+.test-card.failed {
+  border-color: rgba(255, 105, 120, 0.7);
+}
+
+.history-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.35fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.submission-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.submission-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid rgba(154, 176, 208, 0.18);
+  border-radius: 8px;
+  background: rgba(8, 15, 27, 0.8);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.submission-row span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.submission-detail {
+  min-width: 0;
+}
+
 .tabs {
   display: flex;
   gap: 8px;
@@ -487,6 +542,10 @@ textarea {
   }
 
   .test-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .history-layout {
     grid-template-columns: 1fr;
   }
 }

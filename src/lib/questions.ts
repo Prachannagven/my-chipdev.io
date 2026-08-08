@@ -658,10 +658,37 @@ const moduleInterfaces: Record<string, string> = {
   output logic [DATA_WIDTH-1:0] dout2,
   output logic collision
 );`,
-  Q31: `module configurable_8_bit_lfsr (...);`,
-  Q32: `module carry_select_adder (...);`,
-  Q33: `module bubble_sort (...);`,
-  Q34: `module mealy_fsm (...);`,
+  Q31: `module configurable_8_bit_lfsr (
+  input logic clk,
+  input logic resetn,
+  input logic load,
+  input logic [7:0] seed,
+  input logic [7:0] taps,
+  output logic [7:0] dout
+);`,
+  Q32: `module carry_select_adder #(
+  parameter DATA_WIDTH = 8,
+  parameter BLOCK_WIDTH = 4
+) (
+  input logic [DATA_WIDTH-1:0] a,
+  input logic [DATA_WIDTH-1:0] b,
+  input logic cin,
+  output logic [DATA_WIDTH-1:0] sum,
+  output logic cout
+);`,
+  Q33: `module bubble_sort #(
+  parameter NUM_VALUES = 4,
+  parameter DATA_WIDTH = 8
+) (
+  input logic [NUM_VALUES-1:0][DATA_WIDTH-1:0] values_in,
+  output logic [NUM_VALUES-1:0][DATA_WIDTH-1:0] values_out
+);`,
+  Q34: `module mealy_fsm (
+  input logic clk,
+  input logic resetn,
+  input logic din,
+  output logic dout
+);`,
 };
 
 export function getQuestionModuleInterface(id: string): string {
