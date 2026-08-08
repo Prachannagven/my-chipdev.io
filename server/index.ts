@@ -74,7 +74,7 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
-    const url = new URL(request.url, `http://${request.headers.host ?? '127.0.0.1'}`);
+    const url = new URL(request.url, `http://${request.headers.host ?? '0.0.0.0'}`);
     const segments = url.pathname.split('/').filter(Boolean);
 
     if (request.method === 'GET' && url.pathname === '/health') {
@@ -152,5 +152,5 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`ChipDev API listening on http://127.0.0.1:${PORT}`);
+  console.log(`ChipDev API listening on http://0.0.0.0:${PORT}`);
 });
