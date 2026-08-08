@@ -15,6 +15,9 @@ type WaveformData = {
 
 type RunnerResponse = {
   ok?: boolean;
+  checked?: boolean;
+  status?: 'compile_error' | 'runtime_error' | 'completed';
+  verdict?: 'failed' | 'not_checked';
   stdout?: string;
   stderr?: string;
   error?: string;
@@ -72,7 +75,8 @@ function App() {
 
       const transcript = [result.stdout, result.stderr, result.error].filter(Boolean).join('\n\n');
       const waveformPath = result.vcdPath ? `Waveform saved at: ${result.vcdPath}` : 'Waveform path unavailable.';
-      setRunStatus(result.ok ? 'Passed' : 'Failed');
+      const completedWithoutChecks = result.ok && !result.checked;
+      setRunStatus(result.ok ? (completedWithoutChecks ? 'Completed' : 'Passed') : 'Failed');
       setRunOutput([transcript, waveformPath].filter(Boolean).join('\n\n') || 'No simulator output returned.');
       setDiagnostics(result.diagnostics ?? []);
       setWaveform(result.waveform ?? null);
@@ -152,8 +156,8 @@ function App() {
               <h2>Solution buffer</h2>
             </div>
             <div className="editor-actions">
-              <button className="secondary-button" onClick={runSelectedQuestion}>Run public tests</button>
-              <button className="primary-button" onClick={runSelectedQuestion}>Submit hidden tests</button>
+              <button className="secondary-button" onClick={runSelectedQuestion}>Run graded check</button>
+              <button className="primary-button" onClick={runSelectedQuestion}>Submit</button>
             </div>
           </div>
 
@@ -209,8 +213,8 @@ function App() {
               <h3>Hidden cases</h3>
               <div className="test-card hidden-card">
                 <strong>{selectedQuestion?.hiddenCount} blind tests</strong>
-                <p>Only aggregate pass/fail will be shown after submit.</p>
-                <p className="muted">These cases will be compiled locally but never rendered in full.</p>
+                <p>Aggregate pass/fail is produced by comparing DUT output waveforms against the reference solution.</p>
+                <p className="muted">The candidate VCD is still saved for debugging failed submissions.</p>
               </div>
             </div>
           </div>
@@ -240,7 +244,9 @@ function App() {
 
           {resultTab === 'diagnostics' ? (
             <div className="diagnostics-panel">
-              {runStatus === 'Passed' && diagnostics.length === 0 ? (
+              {runStatus === 'Completed' && diagnostics.length === 0 ? (
+                <pre className="result-log">Simulation completed. No self-checking verdict was produced.</pre>
+              ) : runStatus === 'Passed' && diagnostics.length === 0 ? (
                 <pre className="result-log">Passed</pre>
               ) : diagnostics.length > 0 ? (
                 <pre className="result-log">{diagnostics.join('\n\n')}</pre>

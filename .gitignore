@@ -1,5 +1,6 @@
 dist/
 node_modules/
+.chipdev/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
